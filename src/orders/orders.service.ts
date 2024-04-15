@@ -1,11 +1,12 @@
 import {HttpStatus, Inject, Injectable, Logger, OnModuleInit} from '@nestjs/common';
-import {CreateOrderDto} from './dto/create-order.dto';
-import {PrismaClient} from "@prisma/client";
+import {CreateOrderDto} from './dto';
+import {OrderStatus, PrismaClient} from "@prisma/client";
 import {ClientProxy, RpcException} from "@nestjs/microservices";
 import {OrderPaginationDto} from "./dto/order-pagination.dto";
-import {ChangeOrderStatusDto} from "./dto";
+import {ChangeOrderStatusDto, PaidOrderDto} from "./dto";
 import {NATS_SERVICE} from "../config";
 import {firstValueFrom} from "rxjs";
+import {OrderWithProductsInterface} from "./dto/interfaces/order-with-products.interface";
 
 @Injectable()
 export class OrdersService extends PrismaClient implements OnModuleInit {
@@ -64,8 +65,8 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
 
       return {
         ...order,
-        OrderItem: order.OrderItem.map(orderItem =>({
-            ...orderItem,
+        OrderItem: order.OrderItem.map(orderItem => ({
+          ...orderItem,
           name: products.find(product => product.id === orderItem.productId).name
         }))
       };
@@ -149,5 +150,43 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
       where: {id},
       data: {status}
     });
+  }
+
+  async createPaymentSession(order: OrderWithProductsInterface) {
+    const paymentSession = await firstValueFrom(
+      this.client.send('create.payment.session', {
+        orderId: order.id,
+        currency: 'usd',
+        items: order.OrderItem.map(item => ({
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity
+        }))
+      })
+    );
+
+    return paymentSession;
+  }
+
+  async paidOrder(paidOrderDto: PaidOrderDto) {
+    this.logger.log('Order paid');
+
+    const updatedOrder = await this.order.update({
+      where: {id: paidOrderDto.orderId},
+      data: {
+        status: OrderStatus.PAID,
+        paid: true,
+        paidAt: new Date(),
+        stripeChargeId: paidOrderDto.stripePaymentId,
+        // Relation 1 to 1 created locally
+        OrderReceipt: {
+          create: {
+            receiptUrl: paidOrderDto.receiptUrl
+          }
+        }
+      }
+    });
+
+    return updatedOrder;
   }
 }
